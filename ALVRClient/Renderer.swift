@@ -1685,7 +1685,19 @@ class Renderer {
             }
             renderEncoder.setFragmentTexture(metalTexture, index: i)
         }
-        
+
+        // Per-frame foveation warp center: look up what the encoder applied for this exact
+        // frame (the server stores it in VideoPacketHeader.foveation_center). The Rust side
+        // returns (0, 0) when no header is queued — e.g. dropped frame or pre-A.4 server —
+        // which collapses to lens-centered de-warp.
+        var fovX: Float = 0
+        var fovY: Float = 0
+        alvr_get_foveation_center(queuedFrame.timestamp, &fovX, &fovY)
+        var fovCenter = SIMD2<Float>(fovX, fovY)
+        renderEncoder.setFragmentBytes(&fovCenter,
+                                       length: MemoryLayout<SIMD2<Float>>.size,
+                                       index: BufferIndex.foveationDynamic.rawValue)
+
         // Snoop for pixel formats
         /*for idx in 620..<0xFFFF {
             guard let format = MTLPixelFormat.init(rawValue: UInt(idx)) else {
