@@ -108,6 +108,11 @@ class Renderer {
     let mtlVertexDescriptorNoUV: MTLVertexDescriptor
     var videoFramePipelineState_YpCbCrBiPlanar: MTLRenderPipelineState!
     var videoFramePipelineState_SecretYpCbCrFormats: MTLRenderPipelineState!
+    // Negotiated static foveation center from FoveationSettings. Used as the pre-init for the
+    // per-frame center buffer so pre-A.4 servers (and any server that doesn't fill
+    // VideoPacketHeader.foveation_center) still get their configured center_shift applied — the
+    // per-frame Rust API only overwrites this when it has a real header for the timestamp.
+    var staticFoveationCenter: SIMD2<Float> = .zero
     var videoFrameDepthPipelineState: MTLRenderPipelineState!
     var fullscreenQuadBuffer:MTLBuffer!
     var unitVectorXYZBuffer:MTLBuffer!
@@ -285,6 +290,7 @@ class Renderer {
         }
             
         let foveationVars = FFR.calculateFoveationVars(alvrEvent: EventHandler.shared.streamEvent!.STREAMING_STARTED, foveationSettings: settings.video.foveated_encoding)
+        staticFoveationCenter = SIMD2<Float>(foveationVars.centerShiftX, foveationVars.centerShiftY)
         videoFramePipelineState_YpCbCrBiPlanar = try! buildRenderPipelineForVideoFrameWithDevice(
                             device: device,
                             mtlVertexDescriptor: mtlVertexDescriptor,
@@ -1687,11 +1693,12 @@ class Renderer {
         }
 
         // Per-frame foveation warp center: look up what the encoder applied for this exact
-        // frame (the server stores it in VideoPacketHeader.foveation_center). The Rust side
-        // returns (0, 0) when no header is queued — e.g. dropped frame or pre-A.4 server —
-        // which collapses to lens-centered de-warp.
-        var fovX: Float = 0
-        var fovY: Float = 0
+        // frame (the server stores it in VideoPacketHeader.foveation_center). Pre-init from the
+        // negotiated static center so that servers without per-frame center reporting (pre-A.4,
+        // or any frame where the header isn't queued) keep using FoveationSettings.center_shift
+        // instead of collapsing to lens-centered (0, 0) and mis-de-warping the foveated region.
+        var fovX: Float = staticFoveationCenter.x
+        var fovY: Float = staticFoveationCenter.y
         alvr_get_foveation_center(queuedFrame.timestamp, &fovX, &fovY)
         var fovCenter = SIMD2<Float>(fovX, fovY)
         renderEncoder.setFragmentBytes(&fovCenter,
