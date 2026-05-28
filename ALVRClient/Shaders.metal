@@ -135,8 +135,14 @@ float2 EyeToTextureUV(float2 eyeUV, bool isRightEye) {
     return float2(eyeUV.x * 0.5 + float(isRightEye) * (1. - eyeUV.x), eyeUV.y);
 }
 
+// Keep the per-frame gaze center strictly inside the frustum edge. At exactly ±1 the loBound /
+// (1 - hiBound) terms below collapse to a divide-by-zero and the warp coordinate becomes NaN
+// (black/garbage edge regions). Matches the server-side clamp in alvr_server_core::foveation.
+constant float MAX_CENTER_SHIFT = 0.98;
+
 // DECOMPRESS_AXIS_ALIGNED_FRAGMENT_SHADER
 float2 decompressAxisAlignedCoord(float2 uv, float2 CENTER_SHIFT) {
+    CENTER_SHIFT = clamp(CENTER_SHIFT, float2(-MAX_CENTER_SHIFT), float2(MAX_CENTER_SHIFT));
     bool isRightEye = uv.x > 0.5;
     float2 eyeUV = TextureToEyeUV(uv, isRightEye);
 
