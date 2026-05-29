@@ -107,7 +107,10 @@ constant uint2 TARGET_RESOLUTION [[ function_constant(ALVRFunctionConstantFfrCom
 constant uint2 OPTIMIZED_RESOLUTION [[ function_constant(ALVRFunctionConstantFfrCommonShaderOptimizedResolution) ]];
 constant float2 EYE_SIZE_RATIO [[ function_constant(ALVRFunctionConstantFfrCommonShaderEyeSizeRatio) ]];
 constant float2 CENTER_SIZE [[ function_constant(ALVRFunctionConstantFfrCommonShaderCenterSize) ]];
-constant float2 CENTER_SHIFT [[ function_constant(ALVRFunctionConstantFfrCommonShaderCenterShift) ]];
+// CENTER_SHIFT is now per-frame: bound at BufferIndexFoveationDynamic so the warp center can
+// follow the user's gaze frame-to-frame (driven by alvr_get_foveation_center). The encoder
+// writes its post-alignment center into VideoPacketHeader.foveation_center; the client reads
+// that back and binds the same value here so de-warp matches what was encoded.
 constant float2 EDGE_RATIO [[ function_constant(ALVRFunctionConstantFfrCommonShaderEdgeRatio) ]];
 constant bool CHROMAKEY_ENABLED [[ function_constant(ALVRFunctionConstantChromaKeyEnabled) ]];
 constant float3 CHROMAKEY_COLOR [[ function_constant(ALVRFunctionConstantChromaKeyColor) ]];
@@ -132,8 +135,14 @@ float2 EyeToTextureUV(float2 eyeUV, bool isRightEye) {
     return float2(eyeUV.x * 0.5 + float(isRightEye) * (1. - eyeUV.x), eyeUV.y);
 }
 
+// Keep the per-frame gaze center strictly inside the frustum edge. At exactly ±1 the loBound /
+// (1 - hiBound) terms below collapse to a divide-by-zero and the warp coordinate becomes NaN
+// (black/garbage edge regions). Matches the server-side clamp in alvr_server_core::foveation.
+constant float MAX_CENTER_SHIFT = 0.98;
+
 // DECOMPRESS_AXIS_ALIGNED_FRAGMENT_SHADER
-float2 decompressAxisAlignedCoord(float2 uv) {
+float2 decompressAxisAlignedCoord(float2 uv, float2 CENTER_SHIFT) {
+    CENTER_SHIFT = clamp(CENTER_SHIFT, float2(-MAX_CENTER_SHIFT), float2(MAX_CENTER_SHIFT));
     bool isRightEye = uv.x > 0.5;
     float2 eyeUV = TextureToEyeUV(uv, isRightEye);
 
@@ -332,11 +341,14 @@ half4 videoFrameFragmentShader_common(half3 color_in) {
     //color = linearToDisplayP3 * color;
 }
 
-fragment half4 videoFrameFragmentShader_YpCbCrBiPlanar(ColorInOut in [[stage_in]], texture2d<half> in_tex_y, texture2d<half> in_tex_uv) {
-    
+fragment half4 videoFrameFragmentShader_YpCbCrBiPlanar(ColorInOut in [[stage_in]],
+                                                       texture2d<half> in_tex_y,
+                                                       texture2d<half> in_tex_uv,
+                                                       constant float2 & centerShift [[ buffer(BufferIndexFoveationDynamic) ]]) {
+
     float2 sampleCoord;
     if (FFR_ENABLED) {
-        sampleCoord = decompressAxisAlignedCoord(in.texCoord);
+        sampleCoord = decompressAxisAlignedCoord(in.texCoord, centerShift);
     } else {
         sampleCoord = in.texCoord;
     }
@@ -361,11 +373,13 @@ fragment half4 videoFrameFragmentShader_YpCbCrBiPlanar(ColorInOut in [[stage_in]
     return videoFrameFragmentShader_common(color);
 }
 
-fragment half4 videoFrameFragmentShader_SecretYpCbCrFormats(ColorInOut in [[stage_in]], texture2d<half> in_tex_y) {
-    
+fragment half4 videoFrameFragmentShader_SecretYpCbCrFormats(ColorInOut in [[stage_in]],
+                                                            texture2d<half> in_tex_y,
+                                                            constant float2 & centerShift [[ buffer(BufferIndexFoveationDynamic) ]]) {
+
     float2 sampleCoord;
     if (FFR_ENABLED) {
-        sampleCoord = decompressAxisAlignedCoord(in.texCoord);
+        sampleCoord = decompressAxisAlignedCoord(in.texCoord, centerShift);
     } else {
         sampleCoord = in.texCoord;
     }

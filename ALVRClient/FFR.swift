@@ -129,10 +129,10 @@ struct FFR {
         
         float2Value = [vars.centerSizeX, vars.centerSizeY]
         constants.setConstantValue(&float2Value, type: .float2, index: ALVRFunctionConstant.ffrCommonShaderCenterSize.rawValue)
-        
-        float2Value = [vars.centerShiftX, vars.centerShiftY]
-        constants.setConstantValue(&float2Value, type: .float2, index: ALVRFunctionConstant.ffrCommonShaderCenterShift.rawValue)
-        
+
+        // centerShift moved out of function constants — the fragment shader now reads it from
+        // BufferIndexFoveationDynamic so it can be updated per-frame from alvr_get_foveation_center.
+
         float2Value = [vars.edgeRatioX, vars.edgeRatioY]
         constants.setConstantValue(&float2Value, type: .float2, index: ALVRFunctionConstant.ffrCommonShaderEdgeRatio.rawValue)
         
