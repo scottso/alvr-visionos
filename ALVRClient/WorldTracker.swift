@@ -568,8 +568,11 @@ class WorldTracker {
                 if let alvrSettings = Settings.getAlvrSettings() {
                     let emulationMode = alvrSettings.headset.controllers?.emulation_mode ?? ""
                     if emulationMode == "PSVR2Sense" && detectedPsvr {
-                            alvr_send_active_interaction_profile(WorldTracker.deviceIdLeftHand, WorldTracker.psvrInteractionProfile)
-                            alvr_send_active_interaction_profile(WorldTracker.deviceIdRightHand, WorldTracker.psvrInteractionProfile)
+                            // v21 added input_ids_ptr / input_ids_count params. Passing none here;
+                            // NOTE: PSVR2 controller emulation may need its supported input path IDs
+                            // populated for full input registration.
+                            alvr_send_active_interaction_profile(WorldTracker.deviceIdLeftHand, WorldTracker.psvrInteractionProfile, nil, 0)
+                            alvr_send_active_interaction_profile(WorldTracker.deviceIdRightHand, WorldTracker.psvrInteractionProfile, nil, 0)
                     }
                 }
                 for stylus in GCStylus.styli {
@@ -3002,11 +3005,20 @@ class WorldTracker {
         }
 
         EventHandler.shared.outgoingWorker.enqueue {
-            // Old API, currently in master/v20
-            //alvr_send_tracking(reportedTargetTimestampNS, trackingMotions, UInt64(trackingMotions.count), [UnsafePointer(skeletonLeftPtr), UnsafePointer(skeletonRightPtr)], [UnsafePointer(eyeGazeLeftPtr), UnsafePointer(eyeGazeRightPtr)])
-            
-            // New API, not upstreamed
-            alvr_send_tracking_and_face_data(reportedTargetTimestampNS, trackingMotions, UInt64(trackingMotions.count), [UnsafePointer(skeletonLeftPtr), UnsafePointer(skeletonRightPtr)], [UnsafePointer(eyeGazeLeftPtr), UnsafePointer(eyeGazeRightPtr)], UnsafePointer(fbFaceExpressions))
+            // v21 alvr_send_tracking takes a single combined eye-gaze quaternion (per-eye gaze
+            // and FB face expressions were dropped in the v20.14.1 -> v21 ABI migration). The
+            // server consumes eyes_combined raw as `gaze * -Z` in head-local space, so rebase
+            // the per-eye world-space gaze (qL/qR) by the inverse head orientation. Falls back
+            // to identity (centered) when no valid gaze is available this frame.
+            // NOTE: the axis/sign convention here needs on-device validation.
+            var combinedEyeGaze = AlvrQuat(x: 0, y: 0, z: 0, w: 1)
+            if simd_length(qL.vector) > 0.5 && simd_length(qR.vector) > 0.5 {
+                let headWorldOrientation = simd_quaternion(transform)
+                let worldGaze = simd_normalize(simd_slerp(qL, qR, 0.5))
+                let gazeHeadLocal = simd_normalize(simd_inverse(headWorldOrientation) * worldGaze)
+                combinedEyeGaze = AlvrQuat(x: gazeHeadLocal.vector.x, y: gazeHeadLocal.vector.y, z: gazeHeadLocal.vector.z, w: gazeHeadLocal.vector.w)
+            }
+            alvr_send_tracking(reportedTargetTimestampNS, trackingMotions, UInt64(trackingMotions.count), [UnsafePointer(skeletonLeftPtr), UnsafePointer(skeletonRightPtr)], &combinedEyeGaze)
 
             if self.needsRecenterTrigger {
                 // TODO raycast to the nearest wall/TV
