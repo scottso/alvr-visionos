@@ -373,7 +373,28 @@ class WorldTracker {
     static let rightThumbstickTouched = alvr_path_string_to_id("/user/hand/right/input/thumbstick/touch")
     static let rightSystemTouched = alvr_path_string_to_id("/user/hand/right/input/system/touch")
     static let rightMenuTouched = alvr_path_string_to_id("/user/hand/right/input/menu/touch")
-    
+
+    // Input path IDs the client actually sends for each PSVR2 Sense controller. These are
+    // registered with the streamer via alvr_send_active_interaction_profile so the server's
+    // automatic button mapper builds bindings for them (an empty set => no input is mapped).
+    // Keep in lockstep with the alvr_send_button calls in the PSVR2 branch of sendGamepadInputs().
+    static let psvr2LeftInputIds: [UInt64] = [
+        leftButtonX, leftButtonY,
+        leftButtonXTouched, leftButtonYTouched,
+        leftThumbstickClick, leftThumbstickTouched, leftThumbstickX, leftThumbstickY,
+        leftTriggerClick, leftTriggerValue, leftTriggerTouched, leftTriggerSensorValue,
+        leftSqueezeClick, leftSqueezeValue, leftSqueezeTouched, leftSqueezeSensorValue,
+        leftMenuClick, leftMenuTouched, leftSystemClick, leftSystemTouched,
+    ]
+    static let psvr2RightInputIds: [UInt64] = [
+        rightButtonA, rightButtonB,
+        rightButtonATouched, rightButtonBTouched,
+        rightThumbstickClick, rightThumbstickTouched, rightThumbstickX, rightThumbstickY,
+        rightTriggerClick, rightTriggerValue, rightTriggerTouched, rightTriggerSensorValue,
+        rightSqueezeClick, rightSqueezeValue, rightSqueezeTouched, rightSqueezeSensorValue,
+        rightMenuClick, rightMenuTouched, rightSystemClick, rightSystemTouched,
+    ]
+
     static let appleHandToSteamVRIndex = [
         //eBone_Root
         "wrist": 1,                         //eBone_Wrist
@@ -568,11 +589,15 @@ class WorldTracker {
                 if let alvrSettings = Settings.getAlvrSettings() {
                     let emulationMode = alvrSettings.headset.controllers?.emulation_mode ?? ""
                     if emulationMode == "PSVR2Sense" && detectedPsvr {
-                            // v21 added input_ids_ptr / input_ids_count params. Passing none here;
-                            // NOTE: PSVR2 controller emulation may need its supported input path IDs
-                            // populated for full input registration.
-                            alvr_send_active_interaction_profile(WorldTracker.deviceIdLeftHand, WorldTracker.psvrInteractionProfile, nil, 0)
-                            alvr_send_active_interaction_profile(WorldTracker.deviceIdRightHand, WorldTracker.psvrInteractionProfile, nil, 0)
+                            // v21 added input_ids_ptr / input_ids_count params. The server uses these
+                            // as the source set for automatic button mapping; passing an empty set
+                            // leaves every press unmapped (controllers track but don't input).
+                            WorldTracker.psvr2LeftInputIds.withUnsafeBufferPointer { buf in
+                                alvr_send_active_interaction_profile(WorldTracker.deviceIdLeftHand, WorldTracker.psvrInteractionProfile, buf.baseAddress, UInt64(buf.count))
+                            }
+                            WorldTracker.psvr2RightInputIds.withUnsafeBufferPointer { buf in
+                                alvr_send_active_interaction_profile(WorldTracker.deviceIdRightHand, WorldTracker.psvrInteractionProfile, buf.baseAddress, UInt64(buf.count))
+                            }
                     }
                 }
                 for stylus in GCStylus.styli {
@@ -1125,31 +1150,23 @@ class WorldTracker {
         }
         if #available(visionOS 26.0, *) {
             objc_sync_enter(controllerLock)
-            if isLeft && self.leftControllerAnchor == nil { // crashes?
-                objc_sync_exit(controllerLock)
+            // Release the lock on every exit path, including the nil early-returns below.
+            defer { objc_sync_exit(controllerLock) }
+
+            guard let controllerAnchor = (isLeft ? self.leftControllerAnchor : self.rightControllerAnchor) as? AccessoryAnchor else {
                 return nil
             }
-            else if !isLeft && self.rightControllerAnchor == nil { // crashes?
-                objc_sync_exit(controllerLock)
+            guard let accessoryProvider = self.accessoryTracking as? AccessoryTrackingProvider else {
                 return nil
             }
-            let controllerAnchor = (isLeft ? self.leftControllerAnchor : self.rightControllerAnchor) as? AccessoryAnchor?
-            if controllerAnchor == nil {
-                objc_sync_exit(controllerLock)
+            guard let predictedAnchor = accessoryProvider.predictAnchor(for: controllerAnchor, at: targetTs) else {
                 return nil
             }
-            let accessoryProvider = self.accessoryTracking as! AccessoryTrackingProvider
-            
-            let predictedAnchor = accessoryProvider.predictAnchor(for: controllerAnchor!!, at: targetTs)
-            if predictedAnchor == nil {
-                objc_sync_exit(controllerLock)
-                return nil
-            }
-            
+
             var rotationCorrection = simd_quatf(.Rotation(eulerAngles: .init(x: Angle2D(degrees: 0.0), y: Angle2D(degrees: 0.0), z: Angle2D(degrees: 0.0), order: .xyz)))
             var positionCorrection = simd_float3()
-            var isPsvr = predictedAnchor?.accessory.name.contains("PlayStation VR") ?? false
-            var isStylusProbably = !(predictedAnchor?.accessory.locations.contains(.grip) ?? false)
+            let isPsvr = predictedAnchor.accessory.name.contains("PlayStation VR")
+            let isStylusProbably = !predictedAnchor.accessory.locations.contains(.grip)
             if isPsvr {
                 // The 5.037 originates from the SteamVR PSVR2 controller model JSON
                 rotationCorrection = simd_quatf(.Rotation(eulerAngles: .init(x: Angle2D(degrees: 5.037), y: Angle2D(degrees: 0.0), z: Angle2D(degrees: 0.0), order: .xyz)))
@@ -1176,10 +1193,10 @@ class WorldTracker {
             
 #if DEBUG_ALVR_TRACKING
             WorldTracker.shared.lockDebuggables()
-            let baseMat = predictedAnchor!.originFromAnchorTransform
-            let aimMat = predictedAnchor!.coordinateSpace(for: .aim, correction: .none).ancestorFromSpaceTransformFloat().matrix.asSanitized()
-            let gripMat = predictedAnchor!.coordinateSpace(for: .grip, correction: .none).ancestorFromSpaceTransformFloat().matrix.asSanitized()
-            let gripSurfaceMat = predictedAnchor!.coordinateSpace(for: .gripSurface, correction: .none).ancestorFromSpaceTransformFloat().matrix.asSanitized()
+            let baseMat = predictedAnchor.originFromAnchorTransform
+            let aimMat = predictedAnchor.coordinateSpace(for: .aim, correction: .none).ancestorFromSpaceTransformFloat().matrix.asSanitized()
+            let gripMat = predictedAnchor.coordinateSpace(for: .grip, correction: .none).ancestorFromSpaceTransformFloat().matrix.asSanitized()
+            let gripSurfaceMat = predictedAnchor.coordinateSpace(for: .gripSurface, correction: .none).ancestorFromSpaceTransformFloat().matrix.asSanitized()
             
             //SIMD4<Float>(0.023110688, 0.014057219, -0.08093621, 1.0) aim to base
             //SIMD4<Float>(0.024390697, -0.018602788, -0.008736208, 1.0) grip to base
@@ -1199,7 +1216,7 @@ class WorldTracker {
             WorldTracker.shared.unlockDebuggables()
 #endif
             
-            var controllerPose = predictedAnchor!.coordinateSpace(for: isStylusProbably ? .aim : .grip, correction: .rendered).ancestorFromSpaceTransformFloat().matrix.asSanitized()
+            var controllerPose = predictedAnchor.coordinateSpace(for: isStylusProbably ? .aim : .grip, correction: .rendered).ancestorFromSpaceTransformFloat().matrix.asSanitized()
             let correctPsvr2Origin = simd_float3(0.002, 0.000, -0.01).asFloat4x4()
             //let basePos = simd_float3(-0.0034, -0.0034, 0.1491).asFloat4x4()
             //let otherBasePos = simd_float3(0.0012800097, 0.004458243, -0.16465126)
@@ -1214,8 +1231,8 @@ class WorldTracker {
             controllerPose = controllerPose * positionCorrection.asFloat4x4()
             
             // Convert from controller space to world space
-            let controllerLinVel = (controllerPose.orientationOnly() * predictedAnchor!.velocity).asSanitized()
-            let controllerAngVel = (controllerPose.orientationOnly() * predictedAnchor!.angularVelocity).asSanitized()
+            let controllerLinVel = (controllerPose.orientationOnly() * predictedAnchor.velocity).asSanitized()
+            let controllerAngVel = (controllerPose.orientationOnly() * predictedAnchor.angularVelocity).asSanitized()
             let transform = self.worldTrackingSteamVRTransform.inverse * controllerPose
             let orientation = (simd_quaternion(transform) * rotationCorrection).asSanitized()
             let position = transform.columns.3.asSanitized()
@@ -1224,8 +1241,7 @@ class WorldTracker {
             let linVelAdjusted = (self.worldTrackingSteamVRTransform.orientationOnly().inverse * controllerLinVel).asSanitized()
             
             let pose = AlvrPose(orientation: AlvrQuat(x: orientation.vector.x, y: orientation.vector.y, z: orientation.vector.z, w: orientation.vector.w), position: (position.x, position.y, position.z))
-            
-            objc_sync_exit(controllerLock)
+
             return AlvrDeviceMotion(device_id: device_id, pose: pose, linear_velocity: (linVelAdjusted.x, linVelAdjusted.y, linVelAdjusted.z), angular_velocity: (controllerAngVel.x, controllerAngVel.y, controllerAngVel.z))
         }
         return nil
