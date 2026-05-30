@@ -14,6 +14,10 @@
 			<key>ProfileName</key>
 			<string>ExtendedGamepad</string>
 		</dict>
+		<dict>
+			<key>ProfileName</key>
+			<string>DirectionalGamepad</string>
+		</dict>
 	</array>
 	<key>NSBonjourServices</key>
 	<array>
